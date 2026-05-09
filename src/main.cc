@@ -2,11 +2,20 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <string>
 
+#include "backend/backend_runner.h"
 #include "cuda/cuda_device.h"
 #include "util/timer.h"
 #include "vmm/vmm_allocator.h"
 #include "vmm/vmm_probe.h"
+
+#ifdef VMM_ENABLE_LLAMA
+#include "backend/llama_runner.h"
+#endif
+#ifdef VMM_ENABLE_ONNX
+#include "backend/onnx_runner.h"
+#endif
 
 namespace {
 
@@ -17,6 +26,14 @@ void PrintUsage() {
   std::printf("\nCommands:\n");
   std::printf("  probe        Query GPU for VMM support\n");
   std::printf("  alloc-smoke  Stress-test the VMM allocator\n");
+#ifdef VMM_ENABLE_LLAMA
+  std::printf("  run-llama    Run llama.cpp inference (test "
+              "workload)\n");
+#endif
+#ifdef VMM_ENABLE_ONNX
+  std::printf("  run-onnx     Run ONNX Runtime inference (test "
+              "workload)\n");
+#endif
   std::printf("  version      Print version\n");
   std::printf("\n");
 }
@@ -26,7 +43,6 @@ void PrintVersion() {
 }
 
 int RunAllocSmoke(int argc, char** argv) {
-  // Parse arguments: --budget <MB> --blocks <N>
   std::size_t budget_mb = 4096;
   int block_count = 1000;
   for (int i = 2; i < argc; ++i) {
@@ -53,7 +69,7 @@ int RunAllocSmoke(int argc, char** argv) {
 
   std::mt19937_64 rng(42);
   std::uniform_int_distribution<std::size_t> size_dist(
-      1024, 32 * 1024 * 1024);  // 1KB to 32MB
+      1024, 32 * 1024 * 1024);
   std::uniform_real_distribution<double> flip(0.0, 1.0);
 
   struct LiveBlock {
@@ -69,7 +85,6 @@ int RunAllocSmoke(int argc, char** argv) {
   int budget_rejections = 0;
 
   for (int i = 0; i < block_count; ++i) {
-    // Occasionally free instead of allocate.
     if (!live.empty() && flip(rng) < 0.3) {
       std::uniform_int_distribution<std::size_t> idx(
           0, live.size() - 1);
@@ -98,7 +113,6 @@ int RunAllocSmoke(int argc, char** argv) {
     }
   }
 
-  // Free remaining.
   for (auto& block : live) {
     allocator.Deallocate(block.ptr);
     ++frees;
@@ -126,6 +140,66 @@ int RunAllocSmoke(int argc, char** argv) {
   return 0;
 }
 
+#ifdef VMM_ENABLE_LLAMA
+int RunLlama(int argc, char** argv) {
+  CUresult init_result = cuInit(0);
+  if (init_result != CUDA_SUCCESS) {
+    std::printf("cuInit failed — no CUDA driver?\n");
+    return 1;
+  }
+
+  std::string model_path;
+  std::string prompt = "Hello";
+  for (int i = 2; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
+      model_path = argv[++i];
+    } else if (std::strcmp(argv[i], "--prompt") == 0 &&
+               i + 1 < argc) {
+      prompt = argv[++i];
+    }
+  }
+
+  if (model_path.empty()) {
+    std::printf("Usage: vmm-project.exe run-llama --model <path> "
+                "[--prompt <text>]\n");
+    return 1;
+  }
+
+  std::printf("Llama runner: model=%s prompt=\"%s\"\n",
+              model_path.c_str(), prompt.c_str());
+  auto result = vmm_project::RunBackend<vmm_project::LlamaRunner>(
+      model_path, prompt);
+  return result.ok ? 0 : 1;
+}
+#endif  // VMM_ENABLE_LLAMA
+
+#ifdef VMM_ENABLE_ONNX
+int RunOnnx(int argc, char** argv) {
+  CUresult init_result = cuInit(0);
+  if (init_result != CUDA_SUCCESS) {
+    std::printf("cuInit failed — no CUDA driver?\n");
+    return 1;
+  }
+
+  std::string model_path;
+  for (int i = 2; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
+      model_path = argv[++i];
+    }
+  }
+
+  if (model_path.empty()) {
+    std::printf("Usage: vmm-project.exe run-onnx --model <path>\n");
+    return 1;
+  }
+
+  std::printf("ONNX runner: model=%s\n", model_path.c_str());
+  auto result = vmm_project::RunBackend<vmm_project::OnnxRunner>(
+      model_path, "");
+  return result.ok ? 0 : 1;
+}
+#endif  // VMM_ENABLE_ONNX
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -142,6 +216,16 @@ int main(int argc, char** argv) {
   if (std::strcmp(command, "alloc-smoke") == 0) {
     return RunAllocSmoke(argc, argv);
   }
+#ifdef VMM_ENABLE_LLAMA
+  if (std::strcmp(command, "run-llama") == 0) {
+    return RunLlama(argc, argv);
+  }
+#endif
+#ifdef VMM_ENABLE_ONNX
+  if (std::strcmp(command, "run-onnx") == 0) {
+    return RunOnnx(argc, argv);
+  }
+#endif
   if (std::strcmp(command, "version") == 0) {
     PrintVersion();
     return 0;
