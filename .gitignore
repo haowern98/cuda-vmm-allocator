@@ -1,0 +1,13 @@
+build*/
+*.exe
+*.dll
+*.lib
+*.exp
+*.obj
+*.o
+*.pdb
+models/
+deps/onnxruntime*/
+__pycache__/
+.vs/
+.DS_Store
