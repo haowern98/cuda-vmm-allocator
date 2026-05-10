@@ -10,6 +10,7 @@
 #include "swap/swap_manager.h"
 #include "util/timer.h"
 #include "vmm/vmm_allocator.h"
+#include "vmm/vmm_dedup.h"
 #include "vmm/vmm_probe.h"
 
 #ifdef VMM_ENABLE_LLAMA
@@ -30,6 +31,7 @@ void PrintUsage() {
   std::printf("  alloc-smoke   Stress-test the VMM allocator\n");
   std::printf("  intercept-smoke  Test CUDA runtime hooking\n");
   std::printf("  swap-smoke   Test GPU swap protocol\n");
+  std::printf("  dedup-smoke  Test content deduplication\n");
 #ifdef VMM_ENABLE_LLAMA
   std::printf("  run-llama    Run llama.cpp inference (test "
               "workload)\n");
@@ -330,6 +332,94 @@ int RunSwapSmoke(int argc, char** argv) {
   return 1;
 }
 
+int RunDedupSmoke() {
+  CUresult init_result = cuInit(0);
+  if (init_result != CUDA_SUCCESS) {
+    std::printf("cuInit failed\n");
+    return 1;
+  }
+
+  std::printf("Dedup-smoke: testing content-based dedup\n");
+
+  vmm_project::VmmAllocator allocator;
+  allocator.Initialize(/*device_index=*/0);
+  vmm_project::VmmDedupTable dedup;
+
+  constexpr std::size_t kBlockSize = 8 * 1024 * 1024;  // 8 MB
+  constexpr int kNumBlocks = 4;
+
+  // Allocate blocks and fill with known data.
+  void* blocks[kNumBlocks];
+  unsigned char patterns[kNumBlocks];
+  for (int i = 0; i < kNumBlocks; ++i) {
+    blocks[i] = allocator.Allocate(kBlockSize, "dedup-test");
+    patterns[i] = static_cast<unsigned char>(0xAA + i);
+  }
+
+  // Upload: blocks 0 and 1 get pattern 0xAA (same content).
+  // Block 2 gets 0xAC, block 3 gets 0xAD (unique).
+  auto upload = [&](void* dst, const void* src, std::size_t size) {
+    std::uint64_t h = vmm_project::VmmDedupTable::Hash(src, size);
+    void* existing = dedup.Lookup(h);
+    if (existing) {
+      allocator.SharePhysical(dst, existing);
+      dedup.Register(h, dst, size);
+      std::printf("  DEDUP HIT: %p shares with %p\n", dst,
+                  existing);
+      return;
+    }
+    cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(dst), src, size);
+    dedup.Register(h, dst, size);
+  };
+
+  auto* host_a = new unsigned char[kBlockSize];
+  auto* host_b = new unsigned char[kBlockSize];
+
+  // Pattern A: fill blocks 0 and 1 with same data.
+  std::memset(host_a, 0xAA, kBlockSize);
+  upload(blocks[0], host_a, kBlockSize);
+  upload(blocks[1], host_a, kBlockSize);  // Should dedup.
+
+  // Pattern B: fill blocks 2 and 3 with different data.
+  std::memset(host_a, 0xBB, kBlockSize);
+  upload(blocks[2], host_a, kBlockSize);
+  std::memset(host_a, 0xCC, kBlockSize);
+  upload(blocks[3], host_a, kBlockSize);
+
+  // Verify: read back all blocks.
+  int mismatches = 0;
+  unsigned char expected[] = {0xAA, 0xAA, 0xBB, 0xCC};
+  for (int i = 0; i < kNumBlocks; ++i) {
+    cuMemcpyDtoH(host_b,
+                 reinterpret_cast<CUdeviceptr>(blocks[i]),
+                 kBlockSize);
+    for (std::size_t j = 0; j < kBlockSize; ++j) {
+      if (host_b[j] != expected[i]) {
+        ++mismatches;
+        break;
+      }
+    }
+  }
+
+  std::printf("  Data mismatches: %d\n", mismatches);
+  std::printf("  Dedup hits:      %zu\n", dedup.dedup_hits());
+  std::printf("  Bytes saved:     %zu MiB\n",
+              dedup.dedup_bytes_saved() / (1024 * 1024));
+  std::printf("  Unique entries:  %zu\n", dedup.unique_entries());
+
+  delete[] host_a;
+  delete[] host_b;
+  for (int i = 0; i < kNumBlocks; ++i) allocator.Deallocate(blocks[i]);
+
+  if (mismatches == 0 && dedup.dedup_hits() == 1 &&
+      dedup.dedup_bytes_saved() == kBlockSize) {
+    std::printf("Dedup-smoke: PASS\n");
+    return 0;
+  }
+  std::printf("Dedup-smoke: FAIL\n");
+  return 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -351,6 +441,9 @@ int main(int argc, char** argv) {
   }
   if (std::strcmp(command, "swap-smoke") == 0) {
     return RunSwapSmoke(argc, argv);
+  }
+  if (std::strcmp(command, "dedup-smoke") == 0) {
+    return RunDedupSmoke();
   }
 #ifdef VMM_ENABLE_LLAMA
   if (std::strcmp(command, "run-llama") == 0) {

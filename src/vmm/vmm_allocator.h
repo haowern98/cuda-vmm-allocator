@@ -37,6 +37,11 @@ class VmmAllocator {
   void RestorePhysical(void* ptr, std::size_t size,
                        const void* host_data);
 
+  // Dedup support: share physical storage between two VAs.
+  // Both must be VMM-backed. dst gets src's physical handle.
+  // dst's previous physical handle is released.
+  void SharePhysical(void* dst_ptr, void* src_ptr);
+
  private:
   struct Entry {
     void* ptr;

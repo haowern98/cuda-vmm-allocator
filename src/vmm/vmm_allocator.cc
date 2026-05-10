@@ -230,5 +230,36 @@ void VmmAllocator::RestorePhysical(void* ptr, std::size_t size,
   stats_.live_bytes += entry.size;
 }
 
+void VmmAllocator::SharePhysical(void* dst_ptr, void* src_ptr) {
+  auto dst_it = entries_.find(dst_ptr);
+  auto src_it = entries_.find(src_ptr);
+  if (dst_it == entries_.end() || src_it == entries_.end())
+    return;
+  Entry& dst = dst_it->second;
+  const Entry& src = src_it->second;
+  if (!dst.is_vmm || !src.is_vmm) return;
+
+  // Unmap dst's current physical handle.
+  CUdeviceptr dst_va = reinterpret_cast<CUdeviceptr>(dst.ptr);
+  std::size_t dst_alloc =
+      ((dst.size + granularity_ - 1) / granularity_) * granularity_;
+  cuMemUnmap(dst_va, dst_alloc);
+  cuMemRelease(dst.physical_handle);
+
+  // Map src's physical handle into dst's VA.
+  VMM_CUDA_CHECK(cuMemMap(dst_va, dst_alloc, /*offset=*/0,
+                           src.physical_handle, /*flags=*/0));
+
+  CUmemAccessDesc access_desc = {};
+  access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  access_desc.location.id = device_index_;
+  access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  VMM_CUDA_CHECK(cuMemSetAccess(dst_va, dst_alloc, &access_desc,
+                                 /*count=*/1));
+
+  dst.physical_handle = src.physical_handle;
+}
+
 }  // namespace vmm_project
+
 

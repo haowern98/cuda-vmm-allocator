@@ -13,6 +13,7 @@
 
 #include "interpose/intercept_hook.h"
 #include "vmm/vmm_allocator.h"
+#include "vmm/vmm_dedup.h"
 
 namespace vmm_project {
 
@@ -58,8 +59,9 @@ std::size_t g_free_count = 0;
 std::size_t g_memcpy_count = 0;
 std::size_t g_launch_count = 0;
 
-// VMM allocator (lazy-init).
+// VMM allocator and dedup (lazy-init).
 VmmAllocator g_vmm_allocator;
+VmmDedupTable g_dedup_table;
 bool g_vmm_active = false;
 
 // --- Hook implementations ---
@@ -78,6 +80,7 @@ CudaError Hook_Malloc(void** devPtr, size_t size) {
 CudaError Hook_Free(void* devPtr) {
   ++g_free_count;
   if (g_vmm_active && devPtr) {
+    g_dedup_table.UnregisterPtr(devPtr);
     g_vmm_allocator.Deallocate(devPtr);
     return kCudaSuccess;
   }
@@ -89,6 +92,20 @@ CudaError Hook_Free(void* devPtr) {
 CudaError Hook_Memcpy(void* dst, const void* src, size_t count,
                       int kind) {
   ++g_memcpy_count;
+  if (g_vmm_active && kind == kMemcpyHostToDevice) {
+    std::uint64_t h = VmmDedupTable::Hash(src, count);
+    void* existing = g_dedup_table.Lookup(h);
+    if (existing) {
+      g_vmm_allocator.SharePhysical(dst, existing);
+      g_dedup_table.Register(h, dst, count);
+      return kCudaSuccess;
+    }
+    CudaError e = g_tramp_memcpy(dst, src, count, kind);
+    if (e == kCudaSuccess) {
+      g_dedup_table.Register(h, dst, count);
+    }
+    return e;
+  }
   return g_tramp_memcpy(dst, src, count, kind);
 }
 

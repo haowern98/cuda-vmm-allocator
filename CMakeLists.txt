@@ -46,6 +46,7 @@ set(VMM_SOURCES
     src/vmm/vmm_probe.cc
     src/vmm/vmm_pool.cc
     src/vmm/vmm_allocator.cc
+    src/vmm/vmm_dedup.cc
     src/interpose/intercept_real.cc
     src/interpose/intercept_hook.cc
     src/swap/swap_context.cc
@@ -62,6 +63,7 @@ set(VMM_HEADERS
     src/vmm/vmm_types.h
     src/vmm/vmm_pool.h
     src/vmm/vmm_allocator.h
+    src/vmm/vmm_dedup.h
     src/interpose/intercept_real.h
     src/interpose/intercept_hook.h
     src/interpose/intercept_types.h
