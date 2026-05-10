@@ -6,6 +6,7 @@
 
 #include "backend/backend_runner.h"
 #include "cuda/cuda_device.h"
+#include "interpose/intercept_real.h"
 #include "util/timer.h"
 #include "vmm/vmm_allocator.h"
 #include "vmm/vmm_probe.h"
@@ -25,7 +26,8 @@ void PrintUsage() {
   std::printf("Usage: vmm-project.exe <command> [options]\n");
   std::printf("\nCommands:\n");
   std::printf("  probe        Query GPU for VMM support\n");
-  std::printf("  alloc-smoke  Stress-test the VMM allocator\n");
+  std::printf("  alloc-smoke   Stress-test the VMM allocator\n");
+  std::printf("  intercept-smoke  Test CUDA runtime hooking\n");
 #ifdef VMM_ENABLE_LLAMA
   std::printf("  run-llama    Run llama.cpp inference (test "
               "workload)\n");
@@ -215,6 +217,9 @@ int main(int argc, char** argv) {
   }
   if (std::strcmp(command, "alloc-smoke") == 0) {
     return RunAllocSmoke(argc, argv);
+  }
+  if (std::strcmp(command, "intercept-smoke") == 0) {
+    return vmm_project::RunInterceptSmoke();
   }
 #ifdef VMM_ENABLE_LLAMA
   if (std::strcmp(command, "run-llama") == 0) {
