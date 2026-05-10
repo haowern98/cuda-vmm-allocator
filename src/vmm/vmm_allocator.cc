@@ -178,4 +178,57 @@ void VmmAllocator::DeallocateFallback(void* ptr) {
       cuMemFree(reinterpret_cast<CUdeviceptr>(ptr)));
 }
 
+void VmmAllocator::ReleasePhysical(void* ptr) {
+  auto it = entries_.find(ptr);
+  if (it == entries_.end()) return;
+  Entry& entry = it->second;
+  if (!entry.is_vmm) return;
+
+  CUdeviceptr va = reinterpret_cast<CUdeviceptr>(entry.ptr);
+  std::size_t alloc_size =
+      ((entry.size + granularity_ - 1) / granularity_) * granularity_;
+
+  cuMemUnmap(va, alloc_size);
+  cuMemRelease(entry.physical_handle);
+  entry.physical_handle = CUmemGenericAllocationHandle{};
+
+  stats_.live_bytes -= entry.size;
+}
+
+void VmmAllocator::RestorePhysical(void* ptr, std::size_t size,
+                                   const void* host_data) {
+  auto it = entries_.find(ptr);
+  if (it == entries_.end()) return;
+  Entry& entry = it->second;
+  if (!entry.is_vmm) return;
+
+  std::size_t alloc_size =
+      ((entry.size + granularity_ - 1) / granularity_) * granularity_;
+
+  CUmemAllocationProp prop = {};
+  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop.location.id = device_index_;
+
+  CUmemGenericAllocationHandle handle{};
+  VMM_CUDA_CHECK(cuMemCreate(&handle, alloc_size, &prop, /*flags=*/0));
+
+  CUdeviceptr va = reinterpret_cast<CUdeviceptr>(entry.ptr);
+  VMM_CUDA_CHECK(cuMemMap(va, alloc_size, /*offset=*/0, handle,
+                           /*flags=*/0));
+
+  CUmemAccessDesc access_desc = {};
+  access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  access_desc.location.id = device_index_;
+  access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  VMM_CUDA_CHECK(cuMemSetAccess(va, alloc_size, &access_desc,
+                                 /*count=*/1));
+
+  VMM_CUDA_CHECK(cuMemcpyHtoD(va, host_data, entry.size));
+
+  entry.physical_handle = handle;
+  stats_.live_bytes += entry.size;
+}
+
 }  // namespace vmm_project
+

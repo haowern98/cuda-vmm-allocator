@@ -7,6 +7,7 @@
 #include "backend/backend_runner.h"
 #include "cuda/cuda_device.h"
 #include "interpose/intercept_real.h"
+#include "swap/swap_manager.h"
 #include "util/timer.h"
 #include "vmm/vmm_allocator.h"
 #include "vmm/vmm_probe.h"
@@ -28,6 +29,7 @@ void PrintUsage() {
   std::printf("  probe        Query GPU for VMM support\n");
   std::printf("  alloc-smoke   Stress-test the VMM allocator\n");
   std::printf("  intercept-smoke  Test CUDA runtime hooking\n");
+  std::printf("  swap-smoke   Test GPU swap protocol\n");
 #ifdef VMM_ENABLE_LLAMA
   std::printf("  run-llama    Run llama.cpp inference (test "
               "workload)\n");
@@ -202,6 +204,132 @@ int RunOnnx(int argc, char** argv) {
 }
 #endif  // VMM_ENABLE_ONNX
 
+int RunSwapSmoke(int argc, char** argv) {
+  std::size_t budget_mb = 2048;
+  int block_count = 200;
+  for (int i = 2; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--budget") == 0 && i + 1 < argc) {
+      budget_mb = static_cast<std::size_t>(std::atol(argv[++i]));
+    } else if (std::strcmp(argv[i], "--blocks") == 0 &&
+               i + 1 < argc) {
+      block_count = std::atoi(argv[++i]);
+    }
+  }
+
+  CUresult init_result = cuInit(0);
+  if (init_result != CUDA_SUCCESS) {
+    std::printf("cuInit failed\n");
+    return 1;
+  }
+
+  std::printf("Swap-smoke: budget=%zu MiB, blocks=%d\n",
+              budget_mb, block_count);
+
+  vmm_project::VmmAllocator allocator;
+  allocator.Initialize(/*device_index=*/0);
+
+  std::mt19937_64 rng(123);
+  std::uniform_int_distribution<std::size_t> size_dist(
+      4 * 1024 * 1024, 32 * 1024 * 1024);
+  std::uniform_int_distribution<int> fill_dist(0, 255);
+  std::size_t budget_bytes = budget_mb * 1024 * 1024;
+
+  // Allocate blocks for backend-a, fill with known pattern.
+  struct BlockInfo {
+    void* ptr;
+    std::size_t size;
+    char pattern_byte;
+  };
+  std::vector<BlockInfo> blocks_a;
+
+  for (int i = 0; i < block_count; ++i) {
+    std::size_t size = size_dist(rng);
+    if (allocator.stats().live_bytes + size > budget_bytes)
+      continue;
+    char tag[32];
+    std::snprintf(tag, sizeof(tag), "backend-a");
+    void* ptr = allocator.Allocate(size, tag);
+    if (!ptr) break;
+
+    // Fill with a known pattern (repeating byte).
+    unsigned char fill_val = static_cast<unsigned char>(
+        fill_dist(rng));
+    // Use cuMemsetD8 to fill on GPU.
+    cuMemsetD8(reinterpret_cast<CUdeviceptr>(ptr), fill_val,
+               size);
+    blocks_a.push_back({ptr, size,
+                        static_cast<char>(fill_val)});
+  }
+  std::printf("  Backend-A: %zu blocks, %zu live bytes\n",
+              blocks_a.size(), allocator.stats().live_bytes);
+
+  // Swap out backend-a.
+  vmm_project::SwapManager swap(&allocator);
+  if (!swap.SwapOut("backend-a")) {
+    std::printf("  SwapOut(backend-a) failed\n");
+    return 1;
+  }
+
+  // Allocate blocks for backend-b.
+  std::vector<BlockInfo> blocks_b;
+  for (int i = 0; i < block_count; ++i) {
+    std::size_t size = size_dist(rng);
+    if (allocator.stats().live_bytes + size > budget_bytes)
+      continue;
+    char tag[32];
+    std::snprintf(tag, sizeof(tag), "backend-b");
+    void* ptr = allocator.Allocate(size, tag);
+    if (!ptr) break;
+    cuMemsetD8(reinterpret_cast<CUdeviceptr>(ptr), 0x42, size);
+    blocks_b.push_back({ptr, size, 0x42});
+  }
+  std::printf("  Backend-B: %zu blocks, %zu live bytes\n",
+              blocks_b.size(), allocator.stats().live_bytes);
+
+  // Swap out backend-b.
+  swap.SwapOut("backend-b");
+
+  // Swap in backend-a and verify.
+  if (!swap.SwapIn("backend-a")) {
+    std::printf("  SwapIn(backend-a) failed\n");
+    return 1;
+  }
+
+  int mismatches = 0;
+  for (const auto& b : blocks_a) {
+    auto* host_check = new unsigned char[b.size];
+    cuMemcpyDtoH(host_check,
+                 reinterpret_cast<CUdeviceptr>(b.ptr), b.size);
+    for (std::size_t j = 0; j < b.size; ++j) {
+      if (host_check[j] !=
+          static_cast<unsigned char>(b.pattern_byte)) {
+        ++mismatches;
+        break;
+      }
+    }
+    delete[] host_check;
+  }
+  std::printf("  Data integrity check: %d/%zu blocks mismatched\n",
+              mismatches, blocks_a.size());
+
+  // Swap B back in so we can clean up properly.
+  swap.SwapIn("backend-b");
+
+  // Clean up both backends.
+  for (auto& b : blocks_b) allocator.Deallocate(b.ptr);
+  for (auto& b : blocks_a) allocator.Deallocate(b.ptr);
+
+  auto final_stats = allocator.stats();
+  std::printf("  Final live bytes: %zu\n", final_stats.live_bytes);
+
+  if (mismatches == 0 && final_stats.live_bytes == 0) {
+    std::printf("Swap-smoke: PASS\n");
+    return 0;
+  }
+  std::printf("Swap-smoke: FAIL\n");
+  return 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -220,6 +348,9 @@ int main(int argc, char** argv) {
   }
   if (std::strcmp(command, "intercept-smoke") == 0) {
     return vmm_project::RunInterceptSmoke();
+  }
+  if (std::strcmp(command, "swap-smoke") == 0) {
+    return RunSwapSmoke(argc, argv);
   }
 #ifdef VMM_ENABLE_LLAMA
   if (std::strcmp(command, "run-llama") == 0) {

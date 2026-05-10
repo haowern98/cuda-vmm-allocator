@@ -48,6 +48,8 @@ set(VMM_SOURCES
     src/vmm/vmm_allocator.cc
     src/interpose/intercept_real.cc
     src/interpose/intercept_hook.cc
+    src/swap/swap_context.cc
+    src/swap/swap_manager.cc
 )
 
 set(VMM_HEADERS
@@ -63,6 +65,8 @@ set(VMM_HEADERS
     src/interpose/intercept_real.h
     src/interpose/intercept_hook.h
     src/interpose/intercept_types.h
+    src/swap/swap_context.h
+    src/swap/swap_manager.h
 )
 
 if(VMM_ENABLE_LLAMA)

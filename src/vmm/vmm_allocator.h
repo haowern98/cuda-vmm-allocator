@@ -30,6 +30,13 @@ class VmmAllocator {
       const char* tag) const;
   VmmStats stats() const { return stats_; }
 
+  // Swap support: release GPU physical backing, keep VA reserved.
+  void ReleasePhysical(void* ptr);
+
+  // Swap support: restore GPU physical backing at existing VA.
+  void RestorePhysical(void* ptr, std::size_t size,
+                       const void* host_data);
+
  private:
   struct Entry {
     void* ptr;
